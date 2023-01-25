@@ -103,7 +103,7 @@ class ConnectionState:
         self.dispatch('message', message)
 
     def parse_message_edit(self, data):
-        print('Message edit')
+        return None
 
     def parse_message_delete(self, data):
-        print('Message delete')
+        return None

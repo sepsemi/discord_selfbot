@@ -2,14 +2,17 @@ import toml
 import logging
 import asyncio
 import uvloop
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import dlib
+
+from src.automation import background_delete
+from src.logger import Logger, MessageLogger
 
 
 logger = logging.getLogger('dlib')
 
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 sh = logging.StreamHandler()
 sh.setFormatter(logging.Formatter(
     '[%(asctime)s][%(levelname)s] %(name)s - %(message)s'))
@@ -18,33 +21,11 @@ logger.addHandler(sh)
 with open('etc/config.toml') as fp:
     config = toml.load(fp)
 
+
 def yield_token(path):
     with open(path) as fp:
         for line in fp.readlines():
             yield line.rstrip()
-
-def should_delete(timestamp):
-    interval = config['settings']['automation']['delete_interval']
-    
-    now = datetime.now(tz=timezone.utc)
-    diff_interval = timestamp + timedelta(seconds=interval)
-    diff_interval_ignore = timestamp + timedelta(seconds=interval + 1)
-
-    if diff_interval < now and diff_interval_ignore > now:
-        return True
-
-async def background_delete(client):
-
-    while not client.is_closed:
-        for message in client.cached_messages:
-            if not client.user.id == message.author.id:
-                continue
-
-            if should_delete(message.created_at):
-                print('trying to delete')
-                await client.delete_message(message.channel.id, message.id)
-
-        await asyncio.sleep(1)
 
 
 class Client(dlib.Client):
@@ -59,27 +40,18 @@ class Client(dlib.Client):
                 self.loop.create_task(background_delete(self))
 
     async def on_new_user(self, ctx):
-        ts = datetime.now()
-        print('[{}][{}] new user: id={}, user={}'.format(
-            ts, self.id, ctx.id, ctx))
+        Logger(self).new_user(ctx)
 
     async def on_message(self, ctx):
-        if self.user.id == ctx.author.id:
-            await self.delete_message(ctx.channel.id, ctx.id)
 
-        ts = datetime.now()
-        print('[{}][{}] send: id={}, channel.id={}, content={}'.format(
-            ts, self.id, ctx.id, ctx.channel.id, ctx.content))
+        self._closed = True
+        MessageLogger(self).send(ctx)
 
     async def on_message_delete(self, ctx):
-        ts = datetime.now()
-        print('[{}][{}] delete: id={}, channel.id={}, content={}'.format(
-            ts, self.id, ctx.id, ctx.channel.id, ctx.content))
+        MessageLogger(self).delete(ctx)
 
     async def on_message_edit(self, before, after):
-        ts = datetime.now()
-        print('[{}][{} edit: id={}, channel.id={}, before={}, after={}'.format(
-            ts, self.id. before.id, before.channel.id, before.content, after.content))
+        MessageLogger(self).edit(before, after)
 
 
 async def main(loop):
@@ -92,6 +64,7 @@ async def main(loop):
 
     await asyncio.wait(clients)
 
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 loop.run_until_complete(main(loop))

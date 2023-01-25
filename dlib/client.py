@@ -61,7 +61,10 @@ class Client:
 
     def dispatch(self, event, *args, **kwargs):
         method = 'on_{}'.format(event)
-        coro = getattr(self, method)
+        try:
+            coro = getattr(self, method)
+        except AttributeError:
+            return None
 
         self._schedule_event(coro, method, *args, **kwargs)
 
@@ -72,13 +75,12 @@ class Client:
             'initial': True,
         }
 
-        # change to backoff
         self._closed = False
+        # this current logic does not reconnect after a disconnect
 
-        while not self._closed:
-
+        while not self.is_closed:
             async with websockets.connect(self._ws.uri, **self._ws_client_params) as sock:
-                while True:
+                while not self.is_closed:
                     try:
                         await self._ws.poll_event(sock)
                     except ReconnectWebSocket as e:
@@ -91,7 +93,7 @@ class Client:
                         _log.error(
                             '[{}] gateway: receive connection closed'.format(self.id))
 
-                        if not e.code in self._can_handle_codes:
+                        if e.code not in self._can_handle_codes:
                             self._closed = True
                             # Signal the keepalive handler its closed
                             self._ws._keep_alive.open = False
@@ -106,7 +108,6 @@ class Client:
         _log.debug('running client_id={}'.format(self.id))
         await self.connect(reconnect)
 
-    
     @property
     def is_closed(self):
         return self._closed

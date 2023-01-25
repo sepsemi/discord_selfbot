@@ -2,7 +2,7 @@
 logging = true
 
 [settings.automation]
-user_ids = [1324726462364]
+user_ids = [0]
 delete_interval = 1800
 delete = true
 

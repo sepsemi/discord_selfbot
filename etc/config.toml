@@ -1,0 +1,15 @@
+[settings]
+logging = true
+
+[settings.automation]
+user_ids = [your-user-id]
+delete_interval = 1800
+delete = true
+
+[database]
+host = "127.0.0.1"
+port = 8058
+username = "someone"
+password = "someone"
+database = "discord"
+

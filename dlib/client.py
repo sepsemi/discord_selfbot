@@ -106,15 +106,20 @@ class Client:
         _log.debug('running client_id={}'.format(self.id))
         await self.connect(reconnect)
 
-    @ property
+    
+    @property
+    def is_closed(self):
+        return self._closed
+
+    @property
     def user(self):
         return self._connection.user
 
-    @ property
+    @property
     def users(self):
         return list(self._connection._users.values())
 
-    @ property
+    @property
     def cached_messages(self):
         return list(self._connection._messages.values())
 

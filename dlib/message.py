@@ -20,4 +20,5 @@ class Message:
         self.author = User(state=state, data=data['author'])
         self.created_at = snowflake_time(self.id)
         self.content = data['content']
+    
 

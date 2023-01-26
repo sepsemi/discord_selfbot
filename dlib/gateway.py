@@ -129,7 +129,7 @@ class Websocket:
         self._keep_alive = None
         self.session_id = None
         self.sequence = None
-        self._zlib = bytearray()
+        self._zlib = zlib.decompressobj()
         self._buffer = bytearray()
         self._close_code = None
 

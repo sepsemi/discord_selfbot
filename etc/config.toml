@@ -1,15 +1,20 @@
 [settings]
 logging = true
+password = "your-diskord-password"
 
 [settings.automation]
 user_ids = [999999999999999999]
 delete_interval = 1800
+change_username_interval = 7200
+change_username_prefix = "leet"
+
+change_username = true
 delete = true
 
 [database]
 host = "127.0.0.1"
-port = 8058
-username = "someone"
-password = "someone"
+port = 1337
+username = "something"
+password = "something"
 database = "discord"
 

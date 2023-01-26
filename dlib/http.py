@@ -69,9 +69,9 @@ class HTTPClient:
 
         # run the loop until its no longer limited
         while True:
-            response = await func(url, **kwargs)
 
-            if not response.status in (204, 429, 404):
+            response = await func(url, **kwargs)
+            if not response.status in (200, 204, 429, 404):
                 raise RuntimeError('Response not handled')
 
             # check if we are limited
@@ -110,3 +110,11 @@ class HTTPClient:
         route = Route('DELETE', '/channels/{channel_id}/messages/{message_id}',
                       channel_id=channel_id, message_id=message_id)
         return self.request(route)
+
+    def change_username(self, password, username):
+        payload = {
+            'password': password,
+            'username': username,
+        }
+
+        return self.request(Route('PATCH', '/users/@me'), json=payload)

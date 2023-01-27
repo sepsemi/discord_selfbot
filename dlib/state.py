@@ -65,7 +65,13 @@ class ConnectionState:
             # guild = self._get_guild(guild_id)
 
         except KeyError:
-            channel = self._channels[channel_id]
+            # Absolute cringe!
+            try:
+                channel = self._channels[channel_id]
+            except KeyError:
+                channel = None
+
+            channel = channel
             guild = None
 
         return channel, guild
@@ -88,6 +94,9 @@ class ConnectionState:
 
     def parse_message_create(self, data):
         channel, _ = self._get_guild_channel(data)
+        if channel is None:
+            return None
+
         message = Message(state=self, data=data, channel=channel)
 
         user_id = message.author.id
@@ -95,7 +104,7 @@ class ConnectionState:
             _log.debug('[{}] new user: {}, {}'.format(
                 self.id, message.author.id, message.author))
 
-            # Append user to the user store because we can't fetch the (easily)
+            # Append user to the user store because we can't fetch them (easily)
             user = self.store_user(data['author'])
             self.dispatch('new_user', user)
 

@@ -9,8 +9,7 @@ from .device import create_devices
 from .http import HTTPClient
 from .state import ConnectionState
 from .backoff import ExponentialBackoff
-from .gateway import Websocket, ReconnectWebSocket
-
+from .gateway import Websocket, ReconnectWebSocket, WEBSOCKET_CAN_HANDLE_CODES
 
 # Cannot run many clients, need to fix
 DEVICES = create_devices()
@@ -56,9 +55,6 @@ class Client:
         #self._connection = self._get_connection()
         #self._ws = self._get_websocket()
 
-        # error codes we can handle
-        self._can_handle_codes = ()
-
     @property
     def _ws_client_params(self):
         size = 1024 * 1024 * 2.5
@@ -78,11 +74,8 @@ class Client:
         state.id = self.id
         return state
 
-    def _get_websocket(self):
-        ws_params = {
-            'initial': True,
-        }
-        return Websocket(client=self, loop=self.loop, params=ws_params)
+    def _get_websocket(self, params):
+        return Websocket(client=self, loop=self.loop, params=params)
 
     def _schedule_event(self, coro, event_name, *args, **kwargs):
 
@@ -101,22 +94,24 @@ class Client:
     def clean(self):
         self._closed = False
         self._ws._keep_alive.open = False
-        self._ws.clean()
+
+    def close(self):
+        self._closed = True
+        self._ws._keep_alive.open = False
+        self.loop.create_task(self._connection.http.close())
+
 
     async def connect(self, reconnect):
         backoff = ExponentialBackoff()
+        self._closed = False 
+        ws_params = {'initial': True}
 
-        ws_params = {
-            'initial': True,
-        }
-
-        self._closed = False
-        
         self._connection = self._get_connection()
-        self._ws = self._get_websocket()
-       
+ 
         # i wonder if there is a better way to handle this
         while not self._closed or reconnect is True:
+            self._ws = self._get_websocket(ws_params)
+
             async with websockets.connect(self._ws.uri, **self._ws_client_params) as sock:
                 while not self.is_closed:
                     try:
@@ -125,23 +120,31 @@ class Client:
                         _log.debug('[{}] gateway: got a request to {}'.format(
                             self.id, e.op.lower()))
                         ws_params.update(
-                            sequence=self._ws.sequence, resume=e.resume, session=ws.session_id)
+                            sequence=self._ws.sequence, resume=e.resume, session=self._ws.session_id)
+                        self.close()
+                        continue
 
-                    except websockets.exceptions.ConnectionClosedError as e:
+                    except (
+                            websockets.exceptions.ConnectionClosedError, 
+                            websockets.exceptions.ConnectionClosedOK,
+                    ) as e:
                         _log.error(
-                            '[{}] gateway: receive connection closed'.format(self.id))
-                        
+                            '[{}] gateway: receive connection closed, code={}'.format(self.id, e.code))
+ 
                         # If we cannot handle it close the connection entirely
-                        if e.code not in self._can_handle_codes:
-                            self._closed = True
-                            self._ws._keep_alive.open = False
-                            return None
+                        if e.code not in WEBSOCKET_CAN_HANDLE_CODES:
+                            # raises error if keepalive is not set
+                            return self.close()
+                        
+                        break
                
             # clean up the session for a reconnect
             self.clean()
-
+            
+            # always resume
+            ws_params.update(sequence=self._ws.sequence, resume=True, session=self._ws.session_id)
             retry = backoff.delay()
-            _log.info("Attempting a reconnect in %.2fs", retry)
+            _log.debug("Attempting a reconnect in %.2fs", retry)
             await asyncio.sleep(retry)
 
     async def run(self, reconnect=True):

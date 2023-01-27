@@ -9,6 +9,17 @@ from .utils import minutes_elapsed_timestamp, to_json, from_json
 _log = logging.getLogger(__name__)
 
 
+WEBSOCKET_CAN_HANDLE_CODES = (
+    1000, 
+    1001,
+    1006,
+    4010, 
+    4011, 
+    4012, 
+    4013, 
+    4014
+)
+
 class ReconnectWebSocket(Exception):
 
     def __init__(self, resume=True):
@@ -69,7 +80,8 @@ class AsyncKeepaliveHandler:
             data = self.get_payload()
             try:
                 # Send the payload to the websocket and quit if timeout
-
+                
+                _log.debug('[{}] keepalive: sending payload'.format(self.id))
                 await asyncio.wait_for(self.sock.send(to_json(data)), timeout=self.WINDOW)
                 self._last_send = time.perf_counter()
 
@@ -295,5 +307,6 @@ class Websocket:
             msg = await asyncio.wait_for(sock.recv(), timeout=self._max_heartbeat_timeout)
             await self.received_message(sock, msg)
 
-        except asyncio.exceptions.TimeoutError:
+        except asyncio.exceptions.TimeoutError as e:
             _log.error('[{}] gateway: receive timeout'.format(self.id))
+            raise ReconnectWebSocket

@@ -1,23 +1,31 @@
 import toml
-import logging
-import asyncio
-import uvloop
 from datetime import datetime
 
-from dlib import Client, run_clients, logger
-
-from src.automation import background_delete, background_change_username
-from src.logger import Logger, MessageLogger
+from dlib import (
+    Client,
+    run_clients,
+    logger
+)
+from src.automation import (
+    background_delete,
+    background_change_username
+)
+from src.logger import (
+    Logger,
+    MessageLogger
+)
 
 logger('info')
 
 with open('etc/config.toml') as fp:
     config = toml.load(fp)
 
+
 def yield_token(path):
     with open(path) as fp:
         for line in fp.readlines():
             yield line.rstrip()
+
 
 class Client(Client):
 
@@ -29,7 +37,6 @@ class Client(Client):
         if config['settings']['automation']['delete']:
             if self.user.id in config['settings']['automation']['user_ids']:
                 self.loop.create_task(background_delete(self))
-
 
         if config['settings']['automation']['change_username']:
             if self.user.id in config['settings']['automation']['user_ids']:
@@ -47,6 +54,7 @@ class Client(Client):
     async def on_message_edit(self, before, after):
         MessageLogger(self).edit(before, after)
 
+
 clients = []
 for token in yield_token('etc/tokens.txt'):
     client = Client(token=token)
@@ -54,4 +62,3 @@ for token in yield_token('etc/tokens.txt'):
 
 print('subscribed {} clients'.format(len(clients)))
 run_clients(*clients, reconnect=True)
-

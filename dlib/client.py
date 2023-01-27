@@ -106,10 +106,10 @@ class Client:
         self._closed = False 
         ws_params = {'initial': True}
 
-        self._connection = self._get_connection()
  
         # i wonder if there is a better way to handle this
         while not self._closed or reconnect is True:
+            self._connection = self._get_connection()
             self._ws = self._get_websocket(ws_params)
 
             async with websockets.connect(self._ws.uri, **self._ws_client_params) as sock:

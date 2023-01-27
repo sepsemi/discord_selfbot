@@ -93,7 +93,7 @@ class AsyncKeepaliveHandler:
                 self.websocket.close_from_keep_alive()
                 return None
 
-            await asyncio.sleep(self.interval - self.WINDOW)
+            await asyncio.sleep(self.interval)
 
 
 class Websocket:

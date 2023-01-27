@@ -17,7 +17,7 @@ class RateLimit:
         self._rand = random.Random()
         self._current = float('inf')
         self._timestamp = None
-
+    
     @property
     def limited(self):
         # check if we are limited or not
@@ -30,16 +30,15 @@ class RateLimit:
         if self._timestamp is None:
             self._timestamp = time.time()
             self._current = seconds
-
+        
         self.increase(seconds)
 
     def increase(self, seconds):
         self._current += seconds
-
+     
     @property
     def limited_for(self):
         return self._current
-
 
 class Route:
     BASE = 'https://discord.com/api/v10'
@@ -58,6 +57,9 @@ class Route:
 
 
 class HTTPClient:
+    DNS_CACHE_TTL = 300
+    MAX_SIZE_POOL = 10
+    ESTABLISHED_CONNECTION_TIMEOUT = 1800.0
 
     def __init__(self, loop, token, device):
         self.loop = loop
@@ -65,11 +67,34 @@ class HTTPClient:
         self.id = token[-18:]
         self.device = device
         self.ratelimter = RateLimit()
-        connector = aiohttp.TCPConnector(force_close=True)
-        self.__session = aiohttp.ClientSession(loop=loop, connector=connector)
+        self.__session = self.get_aiohttp_session()
+
+    def get_aiohttp_client_timeout(self):
+        return aiohttp.ClientTimeout(
+            total=None,
+            connect=None,
+            sock_read=None,
+            sock_connect=self.ESTABLISHED_CONNECTION_TIMEOUT
+        )
+
+    def get_aiohttp_connector(self):
+        return aiohttp.TCPConnector(
+            loop=self.loop,
+            ttl_dns_cache=self.DNS_CACHE_TTL,
+            force_close=True,
+            limit=self.MAX_SIZE_POOL
+        )
+
+    def get_aiohttp_session(self):
+        return aiohttp.ClientSession(
+            loop=self.loop, 
+            connector=self.get_aiohttp_connector(),
+            timeout=self.get_aiohttp_client_timeout()
+        )
 
     async def close(self):
         await self.__session.close()
+        
 
     async def make_request(self, method, url, kwargs):
 
@@ -80,22 +105,23 @@ class HTTPClient:
         while True:
 
             response = await func(url, **kwargs)
-            if response.status not in (200, 204, 429, 404):
+            if not response.status in (200, 204, 429, 404):
                 raise RuntimeError('Response not handled')
 
             # check if we are limited
             if response.status == 429:
-                data = from_json(await response.text())
-                # we are limted so we set the time given
+                data = from_json(await response.text())  
+                # we are limted so we set the time given 
                 self.ratelimter.set(data['retry_after'])
 
             if not self.ratelimter.limited:
                 return await response.text()
-
+            
             # there is no reason to do anything, because we are limited
-            _log.info('[{}] ratelimited: ratlimited for {} seconds'.format(
-                self.id, self.ratelimter.limited_for))
+
+            _log.info('[{}] ratelimited: ratlimited for {} seconds'.format(self.id, self.ratelimter.limited_for))
             await asyncio.sleep(self.ratelimter.limited_for)
+
 
     async def request(self, route, **kwargs):
         method = route.method

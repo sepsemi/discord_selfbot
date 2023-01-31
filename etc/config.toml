@@ -11,6 +11,10 @@ change_username_prefix = "leet"
 change_username = true
 delete = true
 
+[settings.command]
+prefix = '--'
+user_id = 999999999999999999
+
 [database]
 host = "127.0.0.1"
 port = 1337

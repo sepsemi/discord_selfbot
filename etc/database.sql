@@ -11,8 +11,8 @@ CREATE TABLE users (
     id BIGINT PRIMARY KEY,
     username varchar(32) NOT NULL,
     discriminator SMALLINT NOT NULL,
-    avatar varchar(32),
+    avatar varchar(38),
     bot BOOLEAN DEFAULT false NOT NULL,
-    public_flags SMALLINT NOT NULL
+    public_flags INTEGER NOT NULL
 );
     

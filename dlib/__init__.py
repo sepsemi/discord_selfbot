@@ -1,18 +1,20 @@
 import logging
 
-from .client import Client
-from .client import run_clients
-
-# setup logger
+from .utils import yield_token
+from .client import (
+    Client, 
+    run_clients
+)
 
 def logger(level="info"):
     # setup a basic logger
 
     logger = logging.getLogger(__name__)
 
+
     sh = logging.StreamHandler()
     sh.setFormatter(logging.Formatter(
-        '[%(asctime)s][%(levelname)s] %(name)s - %(message)s'))
+        '[%(levelname)s][%(asctime)s]%(message)s'))
     logger.addHandler(sh)
     logger.setLevel(getattr(logging, level.upper()))
 

@@ -1,10 +1,14 @@
 import time
+import logging
 import random
 import asyncio
 import aiohttp
 
 from .utils import from_json, to_json
 from urllib.parse import quote as _uriquote
+
+_log = logging.getLogger(__name__)
+
 
 class RateLimit:
     INCREASE_WINDOW = 0.1
@@ -48,19 +52,48 @@ class Route:
         if parameters:
             url = url.format_map({k: _uriquote(v) if isinstance(
                 v, str) else v for k, v in parameters.items()})
-
         self.url = url
 
 
 class HTTPClient:
+    DNS_CACHE_TTL = 300
+    MAX_SIZE_POOL = 10
+    ESTABLISHED_CONNECTION_TIMEOUT = 1800.0
 
     def __init__(self, loop, token, device):
         self.loop = loop
         self.token = token
+        self.id = token[-18:]
         self.device = device
         self.ratelimter = RateLimit()
-        connector = aiohttp.TCPConnector(force_close=True)
-        self.__session = aiohttp.ClientSession(loop=loop, connector=connector)
+        self.__session = self.get_aiohttp_session()
+
+    def get_aiohttp_client_timeout(self):
+        return aiohttp.ClientTimeout(
+            total=None,
+            connect=None,
+            sock_read=None,
+            sock_connect=self.ESTABLISHED_CONNECTION_TIMEOUT
+        )
+
+    def get_aiohttp_connector(self):
+        return aiohttp.TCPConnector(
+            loop=self.loop,
+            ttl_dns_cache=self.DNS_CACHE_TTL,
+            force_close=True,
+            limit=self.MAX_SIZE_POOL
+        )
+
+    def get_aiohttp_session(self):
+        return aiohttp.ClientSession(
+            loop=self.loop, 
+            connector=self.get_aiohttp_connector(),
+            timeout=self.get_aiohttp_client_timeout()
+        )
+
+    async def close(self):
+        await self.__session.close()
+        
 
     async def make_request(self, method, url, kwargs):
 
@@ -84,6 +117,8 @@ class HTTPClient:
                 return await response.text()
             
             # there is no reason to do anything, because we are limited
+
+            _log.info('[{}] ratelimited: ratlimited for {} seconds'.format(self.id, self.ratelimter.limited_for))
             await asyncio.sleep(self.ratelimter.limited_for)
 
 

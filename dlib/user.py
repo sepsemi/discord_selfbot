@@ -17,9 +17,9 @@ class BaseUser:
         self._state = state
         self.id = int(data['id'])
         self.username = data['username']
-        self.discriminator = data['discriminator']
+        self.discriminator = int(data['discriminator'])
         self.avatar = data['avatar']
-        self.bot = data.get('bot', False)
+        self.bot = bool(data.get('bot', False))
         self.system = data.get('system', False)
         self._banner = data.get('banner')
         self._flags = int(data.get('flags', 0))

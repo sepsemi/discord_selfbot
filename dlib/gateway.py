@@ -1,13 +1,47 @@
-import time
 import zlib
+import time
 import logging
 import asyncio
+import threading
 import websockets
 
-from .utils import minutes_elapsed_timestamp, to_json, from_json
+from concurrent.futures import TimeoutError as TreadingTImeoutError
+
+from .utils import (
+    from_json, 
+    to_json,
+    minutes_elapsed_timestamp
+)
 
 _log = logging.getLogger(__name__)
 
+WEBSOCKET_CAN_HANDLE_CODES = (
+    1000, 
+    1001,
+    1006,
+    4010, 
+    4011, 
+    4012, 
+    4013, 
+    4014
+)
+
+def find_role_by_id(roles, role_id):
+    for role in roles:
+        if role['id'] == role_id:
+            return role
+    return None
+
+def find_permission_object_with_permissions(overwrites, permission):
+    for overwrite in overwrites:
+        deny, allow = int(overwrite['deny']), int(overwrite['allow'])
+
+        #if (allow & permission) == permission:
+            #return True
+        if not (deny & permission) == permission:
+            return True
+
+    return False    
 
 class ReconnectWebSocket(Exception):
 
@@ -15,124 +49,183 @@ class ReconnectWebSocket(Exception):
         self.resume = resume
         self.op = 'RESUME' if resume else 'IDENTIFY'
 
+class KeepaliveClient:
 
-class AsyncKeepaliveHandler:
+    def __init__(self, ws, sock, interval):
+        self.ws = ws
+        self.loop = ws.loop
+        self.sock = sock
+        self.interval = interval
+        
+        self.last_ack = time.perf_counter() 
+        self.last_send = time.perf_counter()
+        self.last_recv = time.perf_counter()
+
+    def __str__(self):
+        return 'id={}, interval={}, sequence={}'.format(self.ws.id, self.interval, self.ws.sequence)
+
+class KeepaliveHandler(threading.Thread):
+    # Wait 2 seconds before we give timeout
     WINDOW = 2.0
 
-    def __init__(self, websocket, interval, sock):
-        self.open = False
-        self.websocket = websocket
-        self.interval = interval
-        self.sock = sock
-        self.id = websocket.id
-        self.heartbeat_timeout = websocket._max_heartbeat_timeout
+    def __init__(self):
+        threading.Thread.__init__(self, daemon=False)
+        self._max_heartbeat_timeout = 30.0
+        self.tick_time = 0.5
+        self.clients = {}
+        self._open = True
 
         # Predefined messages
-        self.msg = '[%s] keepalive: heartbeat send, sequence=%s'
-        self.behind_msg = '[%s] keealive: Gateway acknowledged late %.1fs behind'
+        self.msg = '[%s][%s]: Gateway acknowledged heartbeat, sequence=%s'
+        self.behind_msg = '[%s][%s]: Gateway acknowledged late %.1fs behind'
+    
+    @property
+    def heartbeat_timeout(self):
+        return self._max_heartbeat_timeout
 
-        # Metric data
-        timestamp = time.perf_counter()
-        self._last_send = timestamp
-        self._last_ack = timestamp
-        self._last_recv = timestamp
-        self.latency = float('inf')
+    @heartbeat_timeout.setter
+    def heartbeat_timeout(self, value):
+        self._max_heartbeat_timeout = value
 
-    def ack(self):
+    def stop(self):
+        # Signal the loop to stop
+        self._open = False
+         
+    def add(self, client_id, ws, sock, interval):
+        # add the client for hearbeats
+
+        self.clients[client_id] = KeepaliveClient(ws, sock, interval)
+        # we added a new client lets set new possible tick time
+        self.tick_time = self.get_tick_time()
+
+    def remove(self, client_id):
+        # remove the client from the registerd clients
+
+        del self.clients[client_id]
+
+        # we should refresh our tick time
+        self.tick_time = self.get_tick_time()
+
+    def tick(self, client_id): 
+        self.clients[client_id].last_recv = time.perf_counter()
+
+    def ack(self, client_id):
         ack_time = time.perf_counter()
-        self._last_ack = ack_time
-        self.latency = ack_time - self._last_send
+        client = self.clients[client_id]
 
-        if self.latency > 10:
-            _log.warn(self.behind_msg % (self.websocket.id, self.latency))
+        client.last_ack = ack_time
+        client.latency = ack_time - client.last_send
+
+        if client.latency > 10:
+            _log.warn(self.behind_msg % (self.__class__.__name__, client_id, client.latency))
         else:
-            _log.debug(self.msg % (self.id, self.websocket.sequence))
-
-    def tick(self):
-        self._last_recv = time.perf_counter()
-
-    def get_payload(self):
+            _log.debug(self.msg % (self.__class__.__name__, client_id, client.ws.sequence))
+    
+    def get_payload(self, client_id):
+        client = self.clients[client_id]
         return {
-            'op': self.websocket.HEARTBEAT,
-            'd': self.websocket.sequence
+            'op': client.ws.HEARTBEAT,
+            'd': client.ws.sequence
         }
+    
+    def get_tick_time(self):
+        # search for the shortest interval and subtract with WINDOW 
+        times = [client.interval for client in self.clients.values()]
+        if times:
+            return min(times) - self.WINDOW
+        return self.tick_time
 
-    async def run(self):
-        self.open = True
+    def run(self):
+        while self._open:
+            for client_id, client in self.clients.copy().items():
+                if client.last_recv + self.heartbeat_timeout < time.perf_counter():
+                    _log.warn('[{}][{}]: has stopped responding to gateway, closing'.format(self.__class__.__name__, client.ws.id))
+                    client.ws._open = False
+                    self.remove(client_id)
+                
+                # fire heartbeat block if we get error die on client and gateway
+                elif time.perf_counter() - client.last_send - client.interval:
+                    payload = to_json(self.get_payload(client_id))
+                    try:
+                        _log.debug('[{}][{}]: Sending heartbeat to gateway'.format(self.__class__.__name__, client.ws.id))
+                        future = asyncio.run_coroutine_threadsafe(client.sock.send(payload), client.loop)
+                        result = future.result(self.WINDOW)
 
-        while self.open:
-            if self._last_recv + self.heartbeat_timeout < time.perf_counter():
-                _log.warn(
-                    '[{}] keepalive: has stopped responding to gateway, closing'.format(self.id))
-                return None
+                        client.last_send = time.perf_counter()
+                    except TreadingTImeoutError:
+                        client.ws._open = False
+                        self.remove(client_id)
 
-            data = self.get_payload()
-            try:
-                # Send the payload to the websocket and quit if timeout
+            # dynamically update this value when adding and removing clients
+            time.sleep(self.tick_time)
 
-                await asyncio.wait_for(self.sock.send(to_json(data)), timeout=self.WINDOW)
-                self._last_send = time.perf_counter()
+_keep_alive_ref = KeepaliveHandler()
 
-            except asyncio.exceptions.TimeoutError:
-                _log.warn(
-                    '[{}] keepalive: error, closing connection'.format(self.id))
+class DiscordWebSocket:
+    DEFAULT_GATEWAY =               'wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream'
 
-                # We can't really close it in here since we need to raise an exception
-                self.websocket.close_from_keep_alive()
-                return None
+    # 0-12 is documented in discord docs the rest is reverse engineerd
+    DISPATCH =                      0 
+    HEARTBEAT =                     1
+    IDENTIFY =                      2
+    PRESENCE =                      3
+    VOICE_STATE =                   4
+    VOICE_PING =                    5
+    RESUME =                        6
+    RECONNECT =                     7
+    REQUEST_MEMBERS =               8
+    INVALIDATE_SESSION =            9
+    HELLO =                         10
+    HEARTBEAT_ACK =                 11
+    GUILD_SYNC =                    12
+    DM_UPDATE =                     13
+    LAZY_REQUEST =                  14
+    LOBBY_DISCONNECT =              16
+    LOBBY_VOICE_STATES_UPDATE =     17
+    STREAM_CREATE =                 18 
+    STREAM_DELETE =                 19 
+    STREAM_WATCH =                  20 
+    STREAM_PING =                   21 
+    STREAM_SET_PAUSED =             22 
+    REQUEST_APPLICATION_COMMANDS =  24 
 
-            await asyncio.sleep(self.interval - self.WINDOW)
-
-
-class Websocket:
-    DISPATCH = 0
-    HEARTBEAT = 1
-    IDENTIFY = 2
-    PRESENCE = 3
-    VOICE_STATE = 4
-    VOICE_PING = 5
-    RESUME = 6
-    RECONNECT = 7
-    REQUEST_MEMBERS = 8
-    INVALIDATE_SESSION = 9
-    HELLO = 10
-    HEARTBEAT_ACK = 11
-    GUILD_SYNC = 12
-
-    def __init__(self, loop, client, **params):
+    def __init__(self, loop, client, params):
         self.loop = loop
         self.id = client.id
         self.token = client.token
-        self.uri = 'wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream'
+        self.device = client._device
+        self._dispatch = client.dispatch
+        self._keep_alive = None
 
+        # set the timeout to wait for polling events, but also keepalive timeout
+        self._dispatch = client.dispatch
         self._connection = client._connection
         self._discord_parsers = client._connection.parsers
-        self._dispatch = client.dispatch
-
-        # register unique device to spoof the socket connection
-        self._device = client._device
-
-        self._keep_alive = None
-
-        # Updatables
-        self.session_id = params.get('session_id', None)
-        self.sequence = params.get('session_id', None)
-        self.resume_set = params.get('resume', False)
-
         self._max_heartbeat_timeout = client._connection.heartbeat_timeout
+
+        self.resume_set = params.get('resume', False)
+        self.sequence = params.get('session_id', None)
+        self.session_id = params.get('session_id', None)
+        
+        # get the default or reconnect gateway
+        self.gateway =  params.get('gateway', self.DEFAULT_GATEWAY)
+        self._reset_buffer()
+        
+        self._open = True
+
+    def _reset_buffer(self):
         self._zlib = zlib.decompressobj()
         self._buffer = bytearray()
-        self._close_code = None
 
-    def clean(self):
-        # Clean up after ourselfs
-        self._keep_alive = None
-        self.session_id = None
-        self.sequence = None
-        self._zlib = zlib.decompressobj()
-        self._buffer = bytearray()
-        self._close_code = None
+    def _extract_session_from_replace(self, data):
+        # get the first session that is not our current and is as long as our current session_id
+        for session in data:
+            session_id = session['session_id']
+            if len(session_id) >= len(self.session_id) and session_id != self.session_id:
+                return session
 
+        return None
+ 
     async def received_message(self, sock, msg):
         if type(msg) is bytes:
             self._buffer.extend(msg)
@@ -151,79 +244,133 @@ class Websocket:
 
         if seq is not None:
             self.sequence = seq
-
+        
         if self._keep_alive:
-            self._keep_alive.tick()
+            self._keep_alive.tick(self.id)
 
         if op != self.DISPATCH:
             if op == self.RECONNECT:
-                _log.debug('[{}] gateway: Asked for reconnect'.format(self.id))
-                self._keep_alive.open = False
-                raise ReconnectWebSocket()
+                _log.debug('[{}][{}]: Received RECONNECT opcode'.format(self.__class__.__name__, self.id))
+
+                # We should close
+                raise ReconnectWebSocket
 
             if op == self.HEARTBEAT_ACK:
                 if self._keep_alive:
-                    self._keep_alive.ack()
+                    self._keep_alive.ack(self.id)
                 return None
 
             if op == self.HEARTBEAT:
-                await self._keep_alive.send_heartbeat(self.id)
-                _log.debug(
-                    '[{}] gateway: Request forcefull hearbeat send'.format(self.id))
+                if self._keep_alive:
+                    _log.debug('[{}][{}]: Request forcefull hearbeat'.format(self.__class__.__name__, self.id))
                 return None
 
             if op == self.HELLO:
                 interval = data['heartbeat_interval'] / 1000.0
+                self._keep_alive = _keep_alive_ref
+
+                # add the client to the keepalive handler, sends imediatly
+                self._keep_alive.add(self.id, self, sock, interval)
 
                 if not self.resume_set:
-                    # Send identify
+                    # send identify
                     await self.identify(sock)
                 else:
                     await self.resume(sock)
-
-                self._keep_alive = AsyncKeepaliveHandler(
-                    websocket=self, interval=interval, sock=sock)
-                self.loop.create_task(self._keep_alive.run())
 
             if op == self.INVALIDATE_SESSION:
                 if data is True:
                     raise ReconnectWebSocket()
 
-                # Set to null
                 self.sequence = None
                 self.session_id = None
+                self.gateway = self.DEFAULT_GATEWAY
 
+                _log.info('[{}][{}]: Session has been invalidated'.format(self.__class__.__name__, self.id))
                 # Close keepalive
-                self._keep_alive.open = False
-
-                _log.info('[{}] gateway: Invalidated session'.format(self.id))
                 raise ReconnectWebSocket(resume=False)
-
+            
+            # done processing opcodes
             return None
 
         if event == 'READY':
+            self.sequence = msg['s']
+                        
+            self.session_id = data['session_id']
+            self.gateway = data['resume_gateway_url']
+
+            _log.info('[{}][{}]: connected to Gateway session_id={}'.format(self.__class__.__name__, self.id, self.session_id))
+
             # Update our prescence as we connect
             await self.change_presence(sock)
 
+            # Subscribe to all the guilds
+            #await self.subscribe_to_guilds(sock, data['guilds'])
+
         elif event == 'RESUMED':
-            _log.debug('[{}] gateway: has resumed'.format(self.id))
+            _log.info('[{}][{}]: successfully RESUMED session_id={}'.format(self.__class__.__name__, self.id, self.session_id))
+
+        elif event == 'SESSIONS_REPLACE':
+            # update the running session
+            #session = self._extract_session_from_replace(data)
+            
+            # get the last session
+            session = data[-1]
+
+            if session:
+                new_session_id = session['session_id']
+                _log.debug('[{}][{}]: replacing session_id={}, with={}'.format(self.__class__.__name__, self.id, self.session_id, new_session_id))
+                self.session_id = new_session_id
+            return None
 
         try:
             func = self._discord_parsers[event]
         except KeyError:
             if event is not None:
-                _log.debug('[{}] gateway: unsubscribed event seq={}, event={}'.format(
-                    self.id, seq, event))
+                _log.debug('[{}][{}]: Unknown event, seq={}, event={}'.format(self.__class__.__name__, self.id, seq, event))
         else:
             func(data)
 
-    def close_from_keep_alive(self):
-        # Yeah i can't care more anymore.
-        try:
-            raise ReconnectWebSocket()
-        # Funny we are raising anod now we need to close
-        except ReconnectWebSocket:
-            return None
+    async def resume(self, sock):
+        payload = {
+            'op': self.RESUME,
+            'd': {
+                'seq': self.sequence,
+                'session_id': self.session_id,
+                'token': self.token
+            }
+        }
+        await sock.send(to_json(payload))
+
+    async def identify(self, sock):
+        # This is highly unreliable
+        payload = {
+            'op': self.IDENTIFY,
+            'd': {
+                'token': self.token,
+                'capabilities': 1021,
+                'properties': {**self.device},
+                'compress': False,
+                # Need to research
+                'client_state': {
+                    'guild_hashes': {},
+                    'highest_last_message_id': '0',
+                    'read_state_version': 0,
+                    'user_guild_settings_version': -1,
+                    'user_settings_version': -1,
+                    'private_channels_version': '0'
+                }
+            }
+        }
+
+        # Set presence
+        payload['d']['presence'] = {
+            'status': 'idle',
+            'since': 0,
+            'activities': [],
+            'afk': False
+        }
+        await sock.send(to_json(payload))
 
     async def change_presence(self, sock):
         # Create an elapsed timestamp for exmaple "20-60 minutes"
@@ -248,52 +395,79 @@ class Websocket:
         }
         await sock.send(to_json(payload))
 
-    async def resume(self, sock):
+    async def subscribe_to_guilds(self, sock, guilds):
+
+
+        for guild in guilds:
+            await self.subscribe_to_guild_channels(sock, guild)
+    
+            break
+
+    async def subscribe_to_guild_channels(self, sock, guild):
+        guild_id = guild['id']
+        roles = guild['roles']
+        default_role = find_role_by_id(roles, guild_id)
+        
+        channels = guild['channels']
+        payload_channels = {}
+        for index, channel in enumerate(channels):
+            if 'id' in channel.keys():
+                if channel['type'] == 0:
+
+                    permission = (1 << 10) | (1 << 11) | (1 << 16)
+
+                    if find_permission_object_with_permissions(channel['permission_overwrites'], permission):
+                        print(channel['name'])
+                        payload_channels[channel['id']] = [[0,99]]
+
+        print('done')
         payload = {
-            'op': self.RESUME,
-            'd': {
-                'seq': self.sequence,
-                'session_id': self.session_id,
-                'token': self.token
+            "op":14,
+            "d":{
+                "guild_id":"267624335836053506",
+                "typing": True,
+                "activities": True,
+                "threads": True,
+                "channels":{**payload_channels}
             }
         }
+        print('sending lazy request')
         await sock.send(to_json(payload))
 
-    async def identify(self, sock):
-        # This is highly unreliable
-        payload = {
-            'op': self.IDENTIFY,
-            'd': {
-                'token': self.token,
-                'capabilities': 1021,
-                'properties': {**self._device},
-                'compress': False,
-                # Need to research
-                'client_state': {
-                    'guild_hashes': {},
-                    'highest_last_message_id': '0',
-                    'read_state_version': 0,
-                    'user_guild_settings_version': -1,
-                    'user_settings_version': -1,
-                    'private_channels_version': '0'
-                }
-            }
+
+    @property
+    def _ws_settings(self):
+        size = 1024 * 1024 * 2.5
+        return {
+            'max_size': size,
+            'read_limit': size,
+            'write_limit': size
         }
 
-        # Set presence
-        payload['d']['presence'] = {
-            'status': 'idle',
-            'since': 0,
-            'activities': [],
-            'afk': False
-        }
+    async def connect_and_poll(self):
+        async with websockets.connect(self.gateway, **self._ws_settings) as sock:
+            while self._open:
+                try:
+                    msg = await asyncio.wait_for(sock.recv(), timeout=self._max_heartbeat_timeout)
+                    if not self._open:
+                        break
 
-        await sock.send(to_json(payload))
+                    await self.received_message(sock, msg)
 
-    async def poll_event(self, sock):
-        try:
-            msg = await asyncio.wait_for(sock.recv(), timeout=self._max_heartbeat_timeout)
-            await self.received_message(sock, msg)
-
-        except asyncio.exceptions.TimeoutError:
-            _log.error('[{}] gateway: receive timeout'.format(self.id))
+                except asyncio.exceptions.TimeoutError as e:
+                    _log.error('[{}][{}]: Websocket received timeout'.format(self.__class__.__name__, self.id))
+                    raise ReconnectWebSocket
+                
+                except (
+                        websockets.exceptions.ConnectionClosedError,  
+                        websockets.exceptions.ConnectionClosedOK
+                ) as e:
+                    _log.error('[{}][{}]: Websocket closed, code={}'.format(self.__class__.__name__, self.id, e.code))
+                    code = e.code
+                    # check if we can handle this code
+                    if code in WEBSOCKET_CAN_HANDLE_CODES:
+                        # we can issue a reconnect with resume
+                        raise ReconnectWebSocket
+                    
+                    # reset connection
+                    break

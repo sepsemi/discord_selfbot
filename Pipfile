@@ -4,11 +4,12 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-uvloop = "*"
-websockets = "*"
 msgspec = "*"
 aiohttp = "*"
+websockets = "*"
+uvloop = "*"
 toml = "*"
+asyncpg = "*"
 
 [dev-packages]
 

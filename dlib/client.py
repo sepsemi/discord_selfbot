@@ -1,73 +1,61 @@
-import uvloop
 import logging
 import asyncio
-import websockets
-import contextlib
-
-from .device import create_devices
 
 from .http import HTTPClient
 from .state import ConnectionState
+
+from .utils import get_new_loop
+from .device import create_devices
 from .backoff import ExponentialBackoff
-from .gateway import Websocket, ReconnectWebSocket
 
-
-# Cannot run many clients, need to fix
-DEVICES = create_devices()
+from .gateway import (
+    _keep_alive_ref,
+    DiscordWebSocket,
+    ReconnectWebSocket
+)
 
 _log = logging.getLogger(__name__)
 
-def get_new_loop():
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop
+# Cannot run many clients need to fix
+DEVICES = create_devices()
 
-def set_loop_on_client(client, loop):
-    client.loop = loop
+def run_clients(client, *tokens, loop=None, reconnect=True):
+    loop = loop if loop is not None else get_new_loop()
 
-def run_clients(*clients, loop = None, reconnect=True):
-    if loop is None:
-        loop = get_new_loop()
+    tasks = set()
+    for token in tokens:
+        _client = client(token=token, loop=loop)
+        tasks.add(loop.create_task(_client.run(reconnect)))
 
-    tasks = []
-    for client in clients:
-
-        set_loop_on_client(client, loop)
-        tasks.append(loop.create_task(client.run(reconnect)))
-    
     try:
+        _keep_alive_ref.start()
+        # if the loop is none
+
         loop.run_until_complete(asyncio.wait(tasks))
     except KeyboardInterrupt:
         # Gracefull shutdown
         all_tasks = asyncio.gather(*asyncio.all_tasks(loop), return_exceptions=False)
         all_tasks.cancel()
+
+        # Stop the keep_alive thread
+        _keep_alive_ref.stop()
     finally:
         loop.close()
 
 class Client:
 
-    def __init__(self, loop = None, token=None):
+    def __init__(self, loop=None, token=None):
         self.loop = loop
         self.token = token
         self.id = token[:18]
-        self._closed = True
-        self._device = DEVICES.pop()
-        #self._connection = self._get_connection()
-        #self._ws = self._get_websocket()
+        self._device = self._get_device()
+        self._closed = False
+        self.ws = None
+        self._connection = self._get_connection()
 
-        # error codes we can handle
-        self._can_handle_codes = ()
-
-    @property
-    def _ws_client_params(self):
-        size = 1024 * 1024 * 2.5
-
-        return {
-            'max_size': size,
-            'read_limit': size,
-            'write_limit': size
-        }
+    def _get_device(self):
+        # check if we reused a device
+        return DEVICES.pop(0)
 
     def _get_connection(self):
         state = ConnectionState(
@@ -77,12 +65,6 @@ class Client:
         )
         state.id = self.id
         return state
-
-    def _get_websocket(self):
-        ws_params = {
-            'initial': True,
-        }
-        return Websocket(client=self, loop=self.loop, params=ws_params)
 
     def _schedule_event(self, coro, event_name, *args, **kwargs):
 
@@ -95,62 +77,49 @@ class Client:
             coro = getattr(self, method)
         except AttributeError:
             return None
-
-        self._schedule_event(coro, method, *args, **kwargs)
-
-    def clean(self):
-        self._closed = False
-        self._ws._keep_alive.open = False
-        self._ws.clean()
-
-    async def connect(self, reconnect):
-        backoff = ExponentialBackoff()
-
-        ws_params = {
-            'initial': True,
-        }
-
-        self._closed = False
         
-        self._connection = self._get_connection()
-        self._ws = self._get_websocket()
-       
-        # i wonder if there is a better way to handle this
-        while not self._closed or reconnect is True:
-            async with websockets.connect(self._ws.uri, **self._ws_client_params) as sock:
-                while not self.is_closed:
-                    try:
-                        await self._ws.poll_event(sock)
-                    except ReconnectWebSocket as e:
-                        _log.debug('[{}] gateway: got a request to {}'.format(
-                            self.id, e.op.lower()))
-                        ws_params.update(
-                            sequence=self._ws.sequence, resume=e.resume, session=ws.session_id)
-
-                    except websockets.exceptions.ConnectionClosedError as e:
-                        _log.error(
-                            '[{}] gateway: receive connection closed'.format(self.id))
-                        
-                        # If we cannot handle it close the connection entirely
-                        if e.code not in self._can_handle_codes:
-                            self._closed = True
-                            self._ws._keep_alive.open = False
-                            return None
-               
-            # clean up the session for a reconnect
-            self.clean()
-
-            retry = backoff.delay()
-            _log.info("Attempting a reconnect in %.2fs", retry)
-            await asyncio.sleep(retry)
-
-    async def run(self, reconnect=True):
-        _log.debug('running client_id={}'.format(self.id))
-        await self.connect(reconnect)
+        self._schedule_event(coro, method, *args, **kwargs)
 
     @property
     def is_closed(self):
         return self._closed
+
+    def _set_reconnect_params(self, params, resume):
+        params.update(
+            sequence=self.ws.sequence,
+            resume=resume,
+            session=self.ws.session_id,
+            gateway=self.ws.gateway
+        )
+
+    async def connect(self, reconnect):
+        backoff = ExponentialBackoff()
+        # set this for every client started
+        ws_params = {'initial': True}
+
+        while not self._closed or reconnect is True:
+            try:
+                self.ws = DiscordWebSocket(loop=self.loop, client=self, params=ws_params)
+                await self.ws.connect_and_poll()
+            except ReconnectWebSocket as e:
+                _log.debug('[{}][{}]: Got a request to {} the websocket.'.format(self.__class__.__name__, self.id, e.op))
+                self._set_reconnect_params(ws_params, e.resume)
+                continue
+
+            retry = backoff.delay()
+            _log.exception('[{}][{}]: Attempting a reconnect in {:.2f}'.format(self.__class__.__name__, self.id, retry))
+            await asyncio.sleep(retry)
+
+            # we should always try to resume discord will invalidate session if not
+            self._set_reconnect_params(ws_params, resume=True)
+                    
+    async def run(self, reconnect=True):
+        _log.debug('[{}][{}]: Running client'.format(self.__class__.__name__, self.id))
+        await self.connect(reconnect)
+
+    @property
+    def is_ready(self):
+        return self._connection._ready
 
     @property
     def user(self):

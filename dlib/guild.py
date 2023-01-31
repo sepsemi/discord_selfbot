@@ -1,4 +1,4 @@
-from .channel import TextChannel
+from .channel import GuildChannel, TextChannel
 
 def factory_channel(channel_type, channel):
     if channel_type == 0:
@@ -28,8 +28,10 @@ class Guild:
         for channel_data in data['channels']:
             if channel_data['type'] == 0:
                 channel = TextChannel(state, self, channel_data)
-                # Fast lookups
-                self.channels[channel.id] = channel
+            else:
+                # generirc channel
+                channel = GuildChannel(state, self, channel_data)
+            self.channels[channel.id] = channel
 
     def __str__(self):
         return self.name

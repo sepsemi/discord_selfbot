@@ -1,3 +1,4 @@
+import toml
 import asyncio
 from datetime import datetime
 
@@ -24,6 +25,8 @@ from src.database import DiscordDatabase
 
 logger('info')
 
+with open('etc/config.toml') as fp:
+    config = toml.load(fp)
 
 database = None
 
@@ -65,14 +68,8 @@ class Client(Client):
 
 async def main(loop):
     global database
-    
-    connect_map = {
-        "database": "discord",
-        "username": "kylo",
-        "password": "kylo"
-    }
-
-    database = DiscordDatabase(loop=loop, **connect_map)
+        
+    database = DiscordDatabase(loop=loop, **config['database'])
     await database.connect()
 
     clients = []
@@ -81,7 +78,6 @@ async def main(loop):
         clients.append(loop.create_task(client.run()))
     
     await asyncio.wait(clients)
-
 
 
 loop = asyncio.new_event_loop()

@@ -349,7 +349,7 @@ class DiscordWebSocket:
             'd': {
                 'token': self.token,
                 'capabilities': 1021,
-                'properties': {**self.device},
+                'properties': {**self.device.headers},
                 'compress': False,
                 # Need to research
                 'client_state': {
@@ -450,6 +450,7 @@ class DiscordWebSocket:
                 try:
                     msg = await asyncio.wait_for(sock.recv(), timeout=self._max_heartbeat_timeout)
                     if not self._open:
+                        # Should not rely on this, can still fire without
                         break
 
                     await self.received_message(sock, msg)

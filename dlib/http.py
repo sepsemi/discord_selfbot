@@ -128,7 +128,8 @@ class HTTPClient:
 
         # header creation
         headers = {
-            'useragent': self.device['browser_user_agent'],
+            'useragent': self.device.user_agent,
+            'x-super-properties': self.device.x_super_properties,
             'authorization': self.token
         }
 

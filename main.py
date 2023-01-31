@@ -19,7 +19,7 @@ from src.logger import (
     MessageLogger
 )
 
-from src.command import CommandProcessor
+from src.processor import CommandProcessor
 
 from src.database import DiscordDatabase
 
@@ -45,7 +45,8 @@ class Client(Client):
         await asyncio.wait(tasks)
 
         # regiser command processor
-        self.processor = CommandProcessor(loop=self.loop, state=self._connection)
+        #self.processor = CommandProcessor(loop=self.loop, state=self._connection)
+        self.processor = CommandProcessor()
 
     async def on_new_user(self, ctx):
         Logger(self).new_user(ctx)
@@ -57,7 +58,7 @@ class Client(Client):
            
         if self.is_ready:
         # process the command acordingly
-            await self.processor.process(ctx)
+            self.processor.process(ctx)
 
     async def on_message_delete(self, ctx):
         MessageLogger(self).delete(ctx)

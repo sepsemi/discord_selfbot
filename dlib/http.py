@@ -9,36 +9,29 @@ from urllib.parse import quote as _uriquote
 
 _log = logging.getLogger(__name__)
 
-
-class RateLimit:
-    INCREASE_WINDOW = 0.1
+class RateLimiter:
+    WINDOW = 1.5
 
     def __init__(self):
-        self._rand = random.Random()
-        self._current = float('inf')
-        self._timestamp = None
-    
+        self.lock = asyncio.Lock()
+        self.remaining = 0
+
+    def increase(self, value):
+        self.remaining += value * self.WINDOW
+
+    def reset(self):
+        self.remaining = 0
+
+    def get_delay(self):
+        current = time.time()
+        future = time.time() + self.remaining
+
+        remaining = future - current
+        return remaining
+
     @property
     def limited(self):
-        # check if we are limited or not
-        if self._timestamp is not None and time.time() - self._timestamp >= self._current:
-            return False
-
-        return True
-
-    def set(self, seconds):
-        if self._timestamp is None:
-            self._timestamp = time.time()
-            self._current = seconds
-        
-        self.increase(seconds)
-
-    def increase(self, seconds):
-        self._current += seconds
-     
-    @property
-    def limited_for(self):
-        return self._current
+        return self.remaining > 0
 
 class Route:
     BASE = 'https://discord.com/api/v10'
@@ -65,7 +58,7 @@ class HTTPClient:
         self.token = token
         self.id = token[-18:]
         self.device = device
-        self.ratelimter = RateLimit()
+        self.rate_limiter = RateLimiter()
         self.__session = self.get_aiohttp_session()
 
     def get_aiohttp_client_timeout(self):
@@ -94,34 +87,38 @@ class HTTPClient:
     async def close(self):
         await self.__session.close()
         
-
     async def make_request(self, method, url, kwargs):
-
         method = method.lower()
         func = getattr(self.__session, method)
 
         # run the loop until its no longer limited
-        while True:
+        
+        async with self.rate_limiter.lock:
+            while True:
+                if self.rate_limiter.limited:
+                    delay = self.rate_limiter.get_delay()
+                    _log.info('[{}][{}]: Ratelimited: ratlimited for {:.2f} seconds'.format(self.__class__.__name__, self.id, delay)) 
+                    await asyncio.sleep(delay)
+                
+                response = await func(url, **kwargs)
 
-            response = await func(url, **kwargs)
-            if not response.status in (200, 204, 429, 404):
-                # bypass this for now
-                return None
+                if not response.status in (200, 204, 429, 404):
+                    # bypass this for now
+                    
+                    _log.info('[{}][{}]: Unhandled response code: {}'.format(self.__class__.__name__, self.id, response.status))
+                    return None
 
-            # check if we are limited
-            if response.status == 429:
-                data = from_json(await response.text())  
-                # we are limted so we set the time given 
-                self.ratelimter.set(data['retry_after'])
+                # check if we are limited
+                if response.status == 429:
+                    data = from_json(await response.text())  
+                    # we are limted so we set the time given 
+                    self.rate_limiter.increase(data['retry_after'])
 
-            if not self.ratelimter.limited:
+                    continue
+                
+                # Reset the timer after we are no longer limited
+                self.rate_limiter.reset()
                 return await response.text()
-            
-            # there is no reason to do anything, because we are limited
-
-            _log.info('[{}] ratelimited: ratlimited for {} seconds'.format(self.id, self.ratelimter.limited_for))
-            await asyncio.sleep(self.ratelimter.limited_for)
-
 
     async def request(self, route, **kwargs):
         method = route.method

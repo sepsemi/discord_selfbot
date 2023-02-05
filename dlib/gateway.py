@@ -249,8 +249,6 @@ class DiscordWebSocket:
                 _log.debug('[{}][{}]: Received RECONNECT opcode'.format(self.__class__.__name__, self.id))
 
                 await self.close(sock)
-
-                _log.debug('[{}][{}]: In reconnect transition sock closed={}'.format(self.__class__.__name__, self.id, sock.open))
                 raise ReconnectWebSocket
 
             if op == self.HEARTBEAT_ACK:

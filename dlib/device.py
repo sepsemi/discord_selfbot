@@ -64,7 +64,7 @@ class Device:
     @property
     def x_super_properties(self):
         headers = self.headers
-        return urlsafe_b64encode(to_json(headers))
+        return urlsafe_b64encode(to_json(headers)).decode()
     
 def get_browser_version(agent):
     # get the version string from user agent string

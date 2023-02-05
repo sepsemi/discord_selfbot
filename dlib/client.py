@@ -19,6 +19,8 @@ _log = logging.getLogger(__name__)
 # Cannot run many clients need to fix
 DEVICES = create_devices()
 
+_keep_alive_ref.start()
+
 def run_clients(client, *tokens, loop=None, reconnect=True):
     loop = loop if loop is not None else get_new_loop()
 
@@ -44,7 +46,7 @@ def run_clients(client, *tokens, loop=None, reconnect=True):
 
 class Client:
 
-    def __init__(self, loop=None, token=None):
+    def __init__(self, loop=None, token=None, *hooks):
         self.loop = loop
         self.token = token
         self.id = token[:18]
@@ -89,21 +91,26 @@ class Client:
             sequence=self.ws.sequence,
             resume=resume,
             session=self.ws.session_id,
-            gateway=self.ws.gateway
+            gateway=self.ws.gateway,
         )
+        _log.debug('[{}][{}]: set params to: {}'.format(self.__class__.__name__, self.id, params))
 
     async def connect(self, reconnect):
         backoff = ExponentialBackoff()
         # set this for every client started
-        ws_params = {'initial': True}
 
+        ws_params = {'initial': True} 
         while not self._closed or reconnect is True:
             try:
                 self.ws = DiscordWebSocket(loop=self.loop, client=self, params=ws_params)
+                ws_params['initial'] = False
                 await self.ws.connect_and_poll()
             except ReconnectWebSocket as e:
+
                 _log.debug('[{}][{}]: Got a request to {} the websocket.'.format(self.__class__.__name__, self.id, e.op))
                 self._set_reconnect_params(ws_params, e.resume)
+                if e.resume:
+                    ws_params['gateway'] = self.ws.gateway
                 continue
 
             retry = backoff.delay()
@@ -114,6 +121,7 @@ class Client:
             self._set_reconnect_params(ws_params, resume=True)
                     
     async def run(self, reconnect=True):
+
         _log.debug('[{}][{}]: Running client'.format(self.__class__.__name__, self.id))
         await self.connect(reconnect)
 

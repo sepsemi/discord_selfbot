@@ -6,7 +6,10 @@ from .user import (
 )
 from .guild import Guild
 from .message import Message
-from .channel import PrivateChannel
+from .channel import (
+    PrivateChannel, 
+    GuildChannel
+)
 
 _log = logging.getLogger(__name__)
 
@@ -102,19 +105,25 @@ class ConnectionState:
             self._channels[channel_id] = PrivateChannel(me=self.user, state=self, data=private_channel)
         
         self._ready = True
+
         self.dispatch('ready')
 
     def parse_channel_create(self, data):
         channel_id = int(data['id'])
         channel_type = int(data['type'])
-
-        print('new_channel: ', channel_type, channel_id)
+        
+        
+        _log.debug('[{self.id}][{self.__class__.__name__}]: new channel: channel_type={channel_type}, channel_id={channel_id}'.format(self=self, channel_type=channel_type, channel_id=channel_id))
 
         if channel_type == 1:
             # New DM or PrivateChannel
-            print(data)
             self._channels[channel_id] = PrivateChannel(me=self.user, state=self, data=data)
-
+        else:
+            # Treat it as any channel (Can be thread or text or anything)
+            guild_id = int(data['guild_id'])
+            # assume we already know the guild
+            guild = self._guilds[guild_id]
+            self._channels[channel_id] = GuildChannel(self, guild, data) 
 
     def parse_message_create(self, data):
         channel = self.store_channel(data)

@@ -105,7 +105,8 @@ class HTTPClient:
 
             response = await func(url, **kwargs)
             if not response.status in (200, 204, 429, 404):
-                raise RuntimeError('Response not handled')
+                # bypass this for now
+                return None
 
             # check if we are limited
             if response.status == 429:
